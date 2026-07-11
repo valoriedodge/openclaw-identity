@@ -16,6 +16,10 @@ BASE_PORT      = 18789
 TRUST_DOMAIN   = "example.org"
 
 
+PLUGIN_SRC  = PROJECT_DIR / "plugin"
+PLUGIN_NAME = "spiffe-security-enforcer"
+
+
 def _default_name(n: int) -> str:
     return f"openclaw-gateway-{n}"
 
@@ -84,6 +88,7 @@ def add(
     label: str = typer.Option(None, "--label", help="Docker 'app' label and SPIFFE ID suffix (default: same as --name)."),
     no_onboard: bool = typer.Option(False, "--no-onboard", help="Skip interactive onboarding."),
     no_register: bool = typer.Option(False, "--no-register", help="Skip SPIRE workload registration."),
+    no_plugin: bool = typer.Option(False, "--no-plugin", help="Skip plugin installation."),
 ) -> None:
     """Add a new gateway: create workspace, update docker-compose, onboard, and register.
 
@@ -114,6 +119,9 @@ def add(
 
     _track_service(name)
     typer.echo(f"  [ok] Tracked '{name}' in .services")
+
+    if not no_plugin:
+        install_plugin(n, name=name)
 
     if not no_onboard:
         typer.echo(f"\n── Onboarding {name} ──")
@@ -161,6 +169,34 @@ def list_gateways() -> None:
     typer.echo("Tracked gateways:")
     for svc in services:
         typer.echo(f"  {svc}")
+
+
+@app.command()
+def install_plugin(
+    n: int = typer.Argument(..., help="Gateway number to install the plugin into."),
+    name: str = typer.Option(None, "--name", help="Service name (default: openclaw-gateway-N)."),
+) -> None:
+    """Install the spiffe-security-enforcer plugin into a gateway's extensions directory."""
+    import shutil
+    name = name or _default_name(n)
+    dest = _workspace_dir(n, name) / "extensions" / PLUGIN_NAME
+
+    if not PLUGIN_SRC.exists():
+        typer.echo(f"[error] Plugin source not found at {PLUGIN_SRC}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"→ Installing plugin into {dest} ...")
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(PLUGIN_SRC, dest)
+    typer.echo(f"  [ok] Copied plugin source")
+
+    typer.echo(f"  Running npm install ...")
+    result = subprocess.run(["npm", "install"], cwd=dest, capture_output=True, text=True)
+    if result.returncode != 0:
+        typer.echo(f"[error] npm install failed:\n{result.stderr}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"  [ok] Plugin installed — restart the gateway to activate it.")
 
 
 @app.command()

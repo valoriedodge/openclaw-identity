@@ -16,6 +16,10 @@ policy/
 # SPIRE agent binary — download separately for your platform
 spire-agent-tool
 
+# Node
+plugin/node_modules/
+plugin/package-lock.json
+
 # Python
 __pycache__/
 *.pyc

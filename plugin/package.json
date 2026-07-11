@@ -1,0 +1,17 @@
+{
+  "name": "spiffe-security-enforcer",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "spiffe": "^0.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "typescript": "^6.0.3"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

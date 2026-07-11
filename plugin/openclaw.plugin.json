@@ -1,0 +1,12 @@
+{
+  "id": "spiffe-security-enforcer",
+  "name": "Audit Trail with Spiffe",
+  "contracts": {
+    "trustedToolPolicies": ["enforce-spire-identity"]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}
