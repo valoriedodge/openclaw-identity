@@ -37,6 +37,8 @@ export PATH="$PATH:$(pwd)"
 
 Run `myclawprint --help` at any time to see available commands.
 
+> **Note:** `spire-agent-certs/` is gitignored — certificates are generated locally and never committed. After cloning, run `python3 myclawprint setup certs` to generate them before starting the stack.
+
 ---
 
 ## First-time setup
@@ -214,7 +216,7 @@ python3 myclawprint setup start
 │       └── policy.py             # rego manipulation
 ├── pyproject.toml
 ├── docker-compose.yml
-├── .services                     # tracks gateways added via `myclawprint gateway add`
+├── .services                     # committed list of gateways; shared across the team
 ├── policy/
 │   └── openclaw.rego             # OPA authorization policy
 ├── spire-server-config/
