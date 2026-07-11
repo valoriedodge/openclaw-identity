@@ -1,0 +1,154 @@
+services:
+  # --------------------------------------------------------
+  # SPIRE INFRASTRUCTURE
+  # --------------------------------------------------------
+  spire-server:
+    image: ghcr.io/spiffe/spire-server:1.14.6
+    volumes:
+      - ./spire-server-config:/opt/spire/conf/server
+      - ./spire-agent-certs:/opt/spire/certs:ro
+      - ./spire-server-data:/opt/spire/data
+
+  spire-agent:
+    image: ghcr.io/spiffe/spire-agent:1.14.6
+    pid: host
+    privileged: true
+    volumes:
+      - ./spire-agent-config:/opt/spire/conf/agent
+      - ./spire-agent-certs:/opt/spire/certs:ro
+      - spire-agent-sockets:/opt/spire/sockets:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro 
+    depends_on:
+      - spire-server
+
+  # --------------------------------------------------------
+  # Logging Sidecar
+  # --------------------------------------------------------
+  fluentd-logger:
+    image: fluent/fluentd:latest
+    volumes:
+      - ./audit-logs:/fluentd/log
+      - ./fluent.conf:/fluentd/etc/fluent.conf:ro
+    ports:
+      - "24224:24224"
+    command: ["fluentd", "-c", "/fluentd/etc/fluent.conf"]
+
+  # --------------------------------------------------------
+  # Open Policy Agent Sidecar
+  # --------------------------------------------------------
+  opa:
+    image: openpolicyagent/opa:latest
+    command:
+      - "run"
+      - "--server"
+      - "--watch"
+      - "--addr=0.0.0.0:8181"
+      - "--log-format=json"
+      - "/policies"
+    volumes:
+      - ./policy:/policies:ro
+    ports:
+      - "8181:8181"   # expose locally for policy development; remove in prod
+    healthcheck:
+      test: ["CMD", "opa", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --------------------------------------------------------
+  # OPENCLAW GATEWAYS
+  # --------------------------------------------------------
+  openclaw-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789"]
+    restart: unless-stopped
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///opt/spire/sockets/agent.sock
+      - OPENCLAW_DISABLE_BONJOUR=true
+      - SIEM_HOST=fluentd-logger
+      - SIEM_PORT=24224
+    volumes:
+      - ~/.openclaw_docker:/home/node/.openclaw
+      - ~/.openclaw_docker/workspace:/home/node/.openclaw/workspace
+      - spire-agent-sockets:/opt/spire/sockets:ro
+      - ./spire-agent-tool:/bin/spire-agent-tool:ro
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18889}:18789"
+    labels:
+      - "app=openclaw-gateway"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - spire-agent
+      - fluentd-logger
+
+  openclaw-gateway-2:
+    image: ghcr.io/openclaw/openclaw:latest
+    command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789"]
+    restart: unless-stopped
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///opt/spire/sockets/agent.sock
+      - OPENCLAW_DISABLE_BONJOUR=true
+      - SIEM_HOST=fluentd-logger
+      - SIEM_PORT=24224
+    volumes:
+      - ~/.openclaw_docker_2:/home/node/.openclaw
+      - ~/.openclaw_docker_2/workspace:/home/node/.openclaw/workspace
+      - spire-agent-sockets:/opt/spire/sockets:ro
+      - ./spire-agent-tool:/bin/spire-agent-tool:ro
+    ports:
+      - "${OPENCLAW_GATEWAY_2_PORT:-18989}:18789"
+    labels:
+      - "app=openclaw-gateway-2"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - spire-agent
+      - fluentd-logger
+
+  openclaw-cli:
+    image: ghcr.io/openclaw/openclaw:latest
+    environment:
+      - SPIFFE_ENDPOINT_SOCKET=unix:///opt/spire/sockets/agent.sock
+      - BROWSER=echo
+    volumes:
+      - ~/.openclaw_docker_cli:/home/node/.openclaw
+      - ~/.openclaw_docker_cli/workspace:/home/node/.openclaw/workspace
+      - spire-agent-sockets:/opt/spire/sockets:ro
+      - ./spire-agent-tool:/bin/spire-agent-tool:ro
+    labels:
+      - "app=openclaw-cli"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    stdin_open: true
+    tty: true
+    init: true
+    depends_on:
+      - openclaw-gateway
+      - openclaw-gateway-2
+      - spire-agent
+    entrypoint: ["node", "dist/index.js"]
+
+volumes:
+  spire-agent-sockets:

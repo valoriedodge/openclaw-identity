@@ -1,0 +1,230 @@
+# Openclaw
+
+Openclaw is a secure AI gateway platform. This setup uses:
+
+- **SPIRE** for workload identity — each gateway container receives a cryptographic SPIFFE identity (SVID) at runtime
+- **Open Policy Agent (OPA)** for tool authorization — controls which tools each identity is permitted to call
+- **Fluentd** for audit logging
+
+Infrastructure is managed through the **myclawprint** CLI.
+
+---
+
+## Prerequisites
+
+- Docker and Docker Compose
+- `openssl` (for certificate generation)
+- `python3` with `typer` installed
+- `sudo` access (required once to set ownership on SPIRE data directories)
+
+```bash
+pip3 install typer
+```
+
+---
+
+## Installation
+
+```bash
+chmod +x myclawprint
+```
+
+Optionally add it to your PATH:
+
+```bash
+export PATH="$PATH:$(pwd)"
+```
+
+Run `myclawprint --help` at any time to see available commands.
+
+---
+
+## First-time setup
+
+```bash
+python3 myclawprint setup all
+```
+
+This runs the full install sequence:
+
+1. Creates required directories
+2. Generates the SPIRE agent certificate (x509pop attestation)
+3. Sets correct ownership on SPIRE data directories
+4. Runs the interactive Openclaw onboarding process for each gateway
+5. Starts all containers
+6. Waits for SPIRE server to be healthy
+7. Registers each gateway as a SPIRE workload
+
+After setup, verify a gateway received its identity:
+
+```bash
+python3 myclawprint identity fetch openclaw-gateway
+```
+
+---
+
+## Adding a new gateway
+
+```bash
+python3 myclawprint gateway add 3
+```
+
+This will:
+
+1. Create `~/.openclaw_openclaw-gateway-3/workspace`
+2. Add `openclaw-gateway-3` to `docker-compose.yml` with label `app=openclaw-gateway-3`
+3. Run the interactive Openclaw onboarding for the new gateway
+4. Register it as a SPIRE workload with SPIFFE ID `spiffe://example.org/ns/apps/sa/openclaw-gateway-3`
+
+Then start it:
+
+```bash
+docker compose up -d openclaw-gateway-3
+```
+
+The gateway is tracked in `.services` so future `myclawprint identity register` calls include it automatically.
+
+### Custom service name and label
+
+You can control the Docker Compose service name and the Docker `app` label (which determines the SPIFFE ID) independently:
+
+```bash
+# Custom name — label defaults to match
+python3 myclawprint gateway add 3 --name research-agent
+
+# Name and label fully independent
+python3 myclawprint gateway add 3 --name research-agent --label spiffe-research
+# → Docker service:  research-agent
+# → Docker label:    app=spiffe-research
+# → SPIFFE ID:       spiffe://example.org/ns/apps/sa/spiffe-research
+```
+
+---
+
+## Managing gateways
+
+| Command | Description |
+|---------|-------------|
+| `myclawprint setup start` | Start all containers |
+| `myclawprint setup stop` | Stop all containers |
+| `myclawprint setup restart` | Restart all containers |
+| `myclawprint setup status` | Show running container status |
+| `myclawprint gateway list` | List tracked gateways (from `.services`) |
+| `myclawprint gateway validate` | Check that each service has a matching `app` label in Docker |
+| `myclawprint gateway onboard <N>` | Re-run onboarding for a specific gateway |
+
+---
+
+## SPIRE workload identity
+
+Each gateway container is assigned a SPIFFE ID of the form:
+
+```
+spiffe://example.org/ns/apps/sa/<label>
+```
+
+where `<label>` is the Docker `app` label set on the container (defaults to the service name).
+
+| Command | Description |
+|---------|-------------|
+| `myclawprint identity register` | Register all tracked gateways with SPIRE |
+| `myclawprint identity register <svc> ...` | Register specific services only |
+| `myclawprint identity list` | Show all registered SPIRE workload entries |
+| `myclawprint identity delete-all` | Delete all SPIRE workload entries (prompts for confirmation) |
+| `myclawprint identity agent-id` | Print the current SPIRE agent SPIFFE ID |
+| `myclawprint identity fetch <service>` | Fetch and display the X.509 SVID for a running container |
+
+---
+
+## OPA tool permissions
+
+Each gateway identity has an explicit list of tools it is permitted to call. Permissions are stored in `policy/openclaw.rego` and reloaded by OPA automatically on change.
+
+**Grant a tool to an identity:**
+
+```bash
+# Short service name
+python3 myclawprint policy grant openclaw-gateway read_file
+
+# Full SPIFFE ID
+python3 myclawprint policy grant spiffe://example.org/ns/apps/sa/openclaw-gateway read_file
+```
+
+**Revoke a tool:**
+
+```bash
+python3 myclawprint policy revoke openclaw-gateway write_file
+```
+
+**List all identities and their permitted tools:**
+
+```bash
+python3 myclawprint policy list
+```
+
+**Seed default permissions** (writes a baseline policy for all default gateways):
+
+```bash
+python3 myclawprint policy seed
+```
+
+You can also edit `policy/openclaw.rego` directly — OPA picks up changes automatically via `--watch`.
+
+---
+
+## Certificates
+
+The SPIRE agent authenticates to the SPIRE server using an x509pop certificate stored in `spire-agent-certs/`. These are generated automatically by `myclawprint setup all` and are valid for 365 days.
+
+To regenerate certificates (e.g. on expiry):
+
+```bash
+python3 myclawprint setup certs       # generates new certs (skips if present)
+```
+
+Or to force regeneration, remove the existing certs first:
+
+```bash
+rm spire-agent-certs/agent.crt.pem spire-agent-certs/agent.key.pem
+python3 myclawprint setup certs
+python3 myclawprint setup stop
+python3 myclawprint setup start
+```
+
+> After regenerating certs the SPIRE agent will re-attest with a new fingerprint.
+> Re-run `python3 myclawprint identity register` to update workload entries with the new parent ID.
+
+---
+
+## Directory structure
+
+```
+.
+├── myclawprint                   # CLI entry point
+├── cli/
+│   ├── main.py                   # top-level Typer app
+│   ├── commands/
+│   │   ├── setup.py              # myclawprint setup ...
+│   │   ├── gateway.py            # myclawprint gateway ...
+│   │   ├── identity.py           # myclawprint identity ...
+│   │   └── policy.py             # myclawprint policy ...
+│   └── utils/
+│       ├── compose.py            # docker compose helpers
+│       ├── spire.py              # spire-server helpers
+│       └── policy.py             # rego manipulation
+├── pyproject.toml
+├── docker-compose.yml
+├── .services                     # tracks gateways added via `myclawprint gateway add`
+├── policy/
+│   └── openclaw.rego             # OPA authorization policy
+├── spire-server-config/
+│   └── server.conf
+├── spire-agent-config/
+│   └── agent.conf
+├── spire-agent-certs/            # generated by `myclawprint setup certs`
+│   ├── agent.crt.pem
+│   └── agent.key.pem
+├── spire-server-data/            # SPIRE server database and keys
+├── audit-logs/                   # Fluentd audit output
+└── fluent.conf
+```
