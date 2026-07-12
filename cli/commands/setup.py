@@ -48,7 +48,7 @@ def dirs() -> None:
     # Fluentd runs as UID 999 and needs write access to audit-logs
     audit_logs = PROJECT_DIR / "audit-logs"
     subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
-    audit_logs.chmod(0o755)
+    subprocess.run(["sudo", "chmod", "755", str(audit_logs)], check=True)
     typer.echo("  Done.")
 
 
@@ -103,11 +103,11 @@ def permissions() -> None:
 
     typer.echo("→ Setting permissions on spire-server-data (UID 1000)...")
     subprocess.run(["sudo", "chown", "-R", "1000:1000", str(SPIRE_DATA)], check=True)
-    SPIRE_DATA.chmod(0o755)
+    subprocess.run(["sudo", "chmod", "755", str(SPIRE_DATA)], check=True)
 
     typer.echo("→ Setting permissions on audit-logs (UID 999 for Fluentd)...")
     subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
-    audit_logs.chmod(0o755)
+    subprocess.run(["sudo", "chmod", "755", str(audit_logs)], check=True)
 
     typer.echo("  Done.")
 
