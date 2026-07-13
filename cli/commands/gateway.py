@@ -152,6 +152,13 @@ def _install_plugin(name: str, workspace: Path) -> None:
     shutil.copytree(PLUGIN_SRC, dest)
     typer.echo(f"  [ok] Copied plugin source")
 
+    typer.echo(f"  Running npm install ...")
+    result = subprocess.run(["npm", "install"], cwd=dest, capture_output=True, text=True)
+    if result.returncode != 0:
+        typer.echo(f"[error] npm install failed:\n{result.stdout}{result.stderr}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"  [ok] npm install complete")
+
     config_file = workspace / "openclaw.json"
     if not config_file.exists():
         typer.echo(f"  [warn] openclaw.json not found — skipping plugin registration (run after onboarding).")

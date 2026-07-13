@@ -60,8 +60,9 @@ def dirs() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
     audit_logs = PROJECT_DIR / "audit-logs"
+    (audit_logs / "buffer").mkdir(parents=True, exist_ok=True)
     subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
-    subprocess.run(["sudo", "chmod", "755", str(audit_logs)], check=True)
+    subprocess.run(["sudo", "chmod", "-R", "755", str(audit_logs)], check=True)
     typer.echo("  Done.")
 
 
@@ -126,8 +127,9 @@ def permissions() -> None:
     ], check=True)
 
     typer.echo("→ Setting permissions on audit-logs (UID 999 for Fluentd)...")
+    (audit_logs / "buffer").mkdir(parents=True, exist_ok=True)
     subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
-    subprocess.run(["sudo", "chmod", "755", str(audit_logs)], check=True)
+    subprocess.run(["sudo", "chmod", "-R", "755", str(audit_logs)], check=True)
     typer.echo("  Done.")
 
 
