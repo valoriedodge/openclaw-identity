@@ -58,11 +58,6 @@ def dirs() -> None:
         PROJECT_DIR / "policy",
     ]:
         d.mkdir(parents=True, exist_ok=True)
-
-    audit_logs = PROJECT_DIR / "audit-logs"
-    (audit_logs / "buffer").mkdir(parents=True, exist_ok=True)
-    subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
-    subprocess.run(["sudo", "chmod", "-R", "755", str(audit_logs)], check=True)
     typer.echo("  Done.")
 
 
@@ -112,24 +107,17 @@ def certs() -> None:
 @app.command()
 def permissions() -> None:
     """Set directory ownership for SPIRE (UID 1000) and Fluentd (UID 999)."""
-    audit_logs = PROJECT_DIR / "audit-logs"
-    audit_logs.mkdir(parents=True, exist_ok=True)
-
-    typer.echo("→ Setting permissions on spire-server-data volume (UID 1000)...")
     import json as _json
     project_name = compose.run("config", "--format", "json", capture=True).stdout
     project = _json.loads(project_name).get("name", PROJECT_DIR.name)
-    volume_name = f"{project}_spire-server-data"
+
+    typer.echo("→ Setting permissions on spire-server-data volume (UID 1000)...")
     subprocess.run([
         "docker", "run", "--rm",
-        "-v", f"{volume_name}:/data",
+        "-v", f"{project}_spire-server-data:/data",
         "busybox", "chown", "-R", "1000:1000", "/data",
     ], check=True)
 
-    typer.echo("→ Setting permissions on audit-logs (UID 999 for Fluentd)...")
-    (audit_logs / "buffer").mkdir(parents=True, exist_ok=True)
-    subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
-    subprocess.run(["sudo", "chmod", "-R", "755", str(audit_logs)], check=True)
     typer.echo("  Done.")
 
 
