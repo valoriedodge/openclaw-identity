@@ -138,48 +138,32 @@ def _patch_origins(workspace: Path, port: int) -> None:
 
 
 def _install_plugin(name: str, workspace: Path) -> None:
-    """Copy plugin source, npm install, register and enable inside the container."""
+    """Copy plugin source to extensions/ and register it in openclaw.json."""
     import shutil
-
-    dest = workspace / "extensions" / PLUGIN_NAME
-    container_plugin_path = f"/home/node/.openclaw/extensions/{PLUGIN_NAME}"
 
     if not PLUGIN_SRC.exists():
         typer.echo(f"[error] Plugin source not found at {PLUGIN_SRC}", err=True)
         raise typer.Exit(1)
 
+    dest = workspace / "extensions" / PLUGIN_NAME
     typer.echo(f"→ Copying plugin to {dest} ...")
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(PLUGIN_SRC, dest)
     typer.echo(f"  [ok] Copied plugin source")
 
-    typer.echo(f"  Running npm install ...")
-    result = subprocess.run(["npm", "install"], cwd=dest, capture_output=True, text=True)
-    if result.returncode != 0:
-        typer.echo(f"[error] npm install failed:\n{result.stderr}", err=True)
-        raise typer.Exit(1)
-    typer.echo(f"  [ok] npm install complete")
-
-    cid = compose.container_id(name)
-    if not cid:
-        typer.echo(f"  [info] Container '{name}' not running — plugin will activate on next start.")
+    config_file = workspace / "openclaw.json"
+    if not config_file.exists():
+        typer.echo(f"  [warn] openclaw.json not found — skipping plugin registration (run after onboarding).")
         return
 
-    typer.echo(f"  Registering plugin with openclaw ...")
-    result = compose.exec(name, "openclaw", "plugins", "install",
-                          f"npm-pack:{container_plugin_path}", capture=True, check=False)
-    if result.returncode != 0:
-        typer.echo(f"[error] Plugin install failed:\n{result.stdout}{result.stderr}", err=True)
-        raise typer.Exit(1)
-    typer.echo(f"  [ok] Plugin registered")
+    config = json.loads(config_file.read_text())
+    plugins = config.setdefault("plugins", {})
+    entries: dict = plugins.setdefault("entries", {})
+    entries.setdefault(PLUGIN_NAME, {})["enabled"] = True
 
-    typer.echo(f"  Enabling plugin ...")
-    result = compose.exec(name, "openclaw", "plugins", "enable", PLUGIN_NAME, capture=True, check=False)
-    if result.returncode != 0:
-        typer.echo(f"[error] Plugin enable failed:\n{result.stdout}{result.stderr}", err=True)
-        raise typer.Exit(1)
-    typer.echo(f"  [ok] Plugin enabled")
+    config_file.write_text(json.dumps(config, indent=2))
+    typer.echo(f"  [ok] Registered and enabled '{PLUGIN_NAME}' in openclaw.json")
 
     typer.echo(f"  Restarting {name} to activate plugin ...")
     compose.run("restart", name)
@@ -208,17 +192,17 @@ def add_to_compose(n: int, name: str, label: str) -> None:
 
 
 def configure_running(n: int, name: str, label: str, skip_onboard: bool = False) -> None:
-    """Install plugin, onboard, patch origins, and register SPIRE entry for a running container."""
+    """Onboard, install plugin, patch origins, and register SPIRE entry for a running container."""
     workspace = _workspace_dir(name)
 
-    _install_plugin(name, workspace)
-
     if not skip_onboard:
-        typer.echo(f"\n── Onboarding {name} ──")
+        typer.echo(f"── Onboarding {name} ──")
         try:
             compose.run_interactive(name, "bash", "-c", "openclaw onboard")
         except subprocess.CalledProcessError:
             typer.echo(f"  [warn] Onboarding skipped or failed for {name}")
+
+    _install_plugin(name, workspace)
 
     _patch_origins(workspace, _host_port(n))
 
