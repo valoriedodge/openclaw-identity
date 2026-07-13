@@ -1,9 +1,6 @@
 # SPIRE certificates — generated locally, never commit private keys
 spire-agent-certs/
 
-# SPIRE server data — contains database and key material
-spire-server-data/
-
 # Audit logs
 audit-logs/
 
