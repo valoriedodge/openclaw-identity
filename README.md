@@ -1,6 +1,6 @@
-# Openclaw
+# Openclaw Identity with Spire
 
-Openclaw is a secure AI gateway platform. This setup uses:
+Openclaw Identity is a secure AI gateway platform setup that uses:
 
 - **SPIRE** for workload identity — each gateway container receives a cryptographic SPIFFE identity (SVID) at runtime
 - **Open Policy Agent (OPA)** for tool authorization — controls which tools each identity is permitted to call
