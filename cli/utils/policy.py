@@ -6,11 +6,30 @@ from typing import Dict, List, Optional
 POLICY_FILE = Path(__file__).parent.parent.parent / "policy" / "openclaw.rego"
 
 
+POLICY_TEMPLATE = """\
+package openclaw.authz
+
+import rego.v1
+
+default allow := false
+
+allow if {
+\tpermitted_tools[input.spiffe_id][_] == input.tool_name
+}
+
+permitted_tools := {
+}
+"""
+
+
 def load() -> str:
+    if not POLICY_FILE.exists():
+        return POLICY_TEMPLATE
     return POLICY_FILE.read_text()
 
 
 def save(content: str) -> None:
+    POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
     POLICY_FILE.write_text(content)
 
 

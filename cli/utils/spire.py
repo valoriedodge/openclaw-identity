@@ -7,8 +7,8 @@ SPIRE_SERVER_BIN = "/opt/spire/bin/spire-server"
 SPIRE_SERVICE    = "spire-server"
 
 
-def server(*args: str, capture: bool = False) -> subprocess.CompletedProcess:
-    return compose.exec(SPIRE_SERVICE, SPIRE_SERVER_BIN, *args, capture=capture)
+def server(*args: str, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    return compose.exec(SPIRE_SERVICE, SPIRE_SERVER_BIN, *args, capture=capture, check=check)
 
 
 def agent_spiffe_id() -> Optional[str]:
@@ -43,6 +43,7 @@ def create_entry(parent_id: str, spiffe_id: str, selector: str) -> subprocess.Co
         "-spiffeID", spiffe_id,
         "-selector", selector,
         capture=True,
+        check=False,
     )
 
 

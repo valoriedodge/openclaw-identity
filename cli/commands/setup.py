@@ -6,6 +6,7 @@ import typer
 from typing import List
 
 from ..utils import compose, spire
+from . import identity as _identity
 
 app = typer.Typer(help="First-time installation and infrastructure setup.")
 
@@ -26,7 +27,10 @@ def all(
         _onboard_all()
     start()
     wait()
-    typer.echo("\nSetup complete. Run 'myclawprint identity register' to register workloads.")
+    typer.echo("→ Waiting for SPIRE agent attestation...")
+    time.sleep(5)
+    _identity.register([])
+    typer.echo("\nSetup complete.")
 
 
 @app.command()

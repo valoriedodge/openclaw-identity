@@ -23,8 +23,8 @@ def run(
     )
 
 
-def exec(service: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess:
-    return run("exec", service, *args, capture=capture)
+def exec(service: str, *args: str, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    return run("exec", service, *args, capture=capture, check=check)
 
 
 def run_interactive(service: str, *args: str) -> None:

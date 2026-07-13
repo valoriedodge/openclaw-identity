@@ -54,14 +54,13 @@ def register(
             spiffe_id=spiffe_id,
             selector=f"docker:label:app:{svc}",
         )
+        combined = (result.stdout or "") + (result.stderr or "")
         if result.returncode == 0:
             typer.echo(f"  [ok] {svc} → {spiffe_id}")
+        elif "already exists" in combined:
+            typer.echo(f"  [skip] {svc}: entry already registered")
         else:
-            # entry may already exist
-            if "already exists" in result.stdout:
-                typer.echo(f"  [skip] {svc}: entry already registered")
-            else:
-                typer.echo(f"  [warn] {svc}: {result.stdout.strip()}")
+            typer.echo(f"  [warn] {svc}: {combined.strip()}")
 
 
 @app.command(name="list")
@@ -75,11 +74,25 @@ def fetch(
     service: str = typer.Argument(..., help="Docker Compose service name."),
 ) -> None:
     """Fetch and display the X.509 SVID for a running container."""
-    compose.exec(
+    result = compose.exec(
         service,
         "/bin/spire-agent-tool", "api", "fetch", "x509",
         "-socketPath", "/opt/spire/sockets/agent.sock",
+        capture=True,
+        check=False,
     )
+    combined = (result.stdout or "") + (result.stderr or "")
+    if result.returncode != 0:
+        if "no identity issued" in combined or "PermissionDenied" in combined:
+            typer.echo(
+                f"[error] No SVID issued for '{service}'. "
+                "Has 'myclawprint identity register' been run and is the agent attested?",
+                err=True,
+            )
+        else:
+            typer.echo(f"[error] {combined.strip()}", err=True)
+        raise typer.Exit(1)
+    typer.echo(combined)
 
 
 @app.command()
