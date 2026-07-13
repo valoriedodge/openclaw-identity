@@ -11,15 +11,10 @@ PROJECT_DIR  = Path(__file__).parent.parent.parent
 SERVICES_FILE = PROJECT_DIR / ".services"
 TRUST_DOMAIN  = "example.org"
 
-DEFAULT_SERVICES = ["openclaw-gateway", "openclaw-gateway-2", "openclaw-cli"]
-
-
 def _services() -> List[str]:
     if SERVICES_FILE.exists():
-        tracked = [s for s in SERVICES_FILE.read_text().split() if s]
-        if tracked:
-            return tracked
-    return DEFAULT_SERVICES
+        return [s for s in SERVICES_FILE.read_text().split() if s]
+    return []
 
 
 @app.command()
@@ -28,6 +23,9 @@ def register(
 ) -> None:
     """Register workload entries in SPIRE for all tracked gateways."""
     targets = services or _services()
+    if not targets:
+        typer.echo("[error] No gateways tracked. Run 'myclawprint setup all' or 'myclawprint gateway add <N>' first.", err=True)
+        raise typer.Exit(1)
 
     parent_id = spire.agent_spiffe_id()
     if not parent_id:

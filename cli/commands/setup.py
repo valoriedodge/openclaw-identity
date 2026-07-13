@@ -7,6 +7,7 @@ from typing import List
 
 from ..utils import compose, spire
 from . import identity as _identity
+from . import gateway as _gateway
 
 app = typer.Typer(help="First-time installation and infrastructure setup.")
 
@@ -17,17 +18,31 @@ AGENT_KEY   = PROJECT_DIR / "spire-agent-certs" / "agent.key.pem"
 
 @app.command()
 def all(
+    gateways: int = typer.Option(1, "--gateways", help="Number of openclaw gateways to create."),
     skip_onboard: bool = typer.Option(False, "--skip-onboard", help="Skip interactive gateway onboarding."),
 ) -> None:
-    """Full first-time setup: dirs, certs, permissions, onboard, start, register."""
+    """Full first-time setup: dirs, certs, add gateways, permissions, start, configure, register."""
     dirs()
     certs()
+
+    typer.echo(f"→ Adding {gateways} gateway(s) to docker-compose.yml...")
+    for n in range(1, gateways + 1):
+        name  = _gateway._default_name(n)
+        label = name
+        _gateway.add_to_compose(n, name, label)
+
     permissions()
-    if not skip_onboard:
-        _onboard_all()
     start()
     wait()
-    typer.echo("→ Waiting for SPIRE agent attestation...")
+
+    typer.echo("→ Configuring gateways (plugin, onboard, origins)...")
+    for n in range(1, gateways + 1):
+        name  = _gateway._default_name(n)
+        label = name
+        typer.echo(f"\n── {name} ──")
+        _gateway.configure_running(n, name, label, skip_onboard=skip_onboard)
+
+    typer.echo("\n→ Waiting for SPIRE agent attestation...")
     time.sleep(5)
     _identity.register([])
     typer.echo("\nSetup complete.")
@@ -35,19 +50,15 @@ def all(
 
 @app.command()
 def dirs() -> None:
-    """Create required data and workspace directories."""
+    """Create required data directories."""
     typer.echo("→ Creating directories...")
     for d in [
         PROJECT_DIR / "spire-agent-certs",
         PROJECT_DIR / "audit-logs",
         PROJECT_DIR / "policy",
-        Path.home() / ".openclaw_docker" / "workspace",
-        Path.home() / ".openclaw_docker_2" / "workspace",
-        Path.home() / ".openclaw_docker_cli" / "workspace",
     ]:
         d.mkdir(parents=True, exist_ok=True)
 
-    # Fluentd runs as UID 999 and needs write access to audit-logs
     audit_logs = PROJECT_DIR / "audit-logs"
     subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
     subprocess.run(["sudo", "chmod", "755", str(audit_logs)], check=True)
@@ -58,7 +69,7 @@ def dirs() -> None:
 def certs() -> None:
     """Generate SPIRE agent certificate (x509pop). Skips if already present."""
     if AGENT_CERT.exists():
-        typer.echo("  Certs already exist — skipping. Run 'myclawprint setup certs --force' to regenerate.")
+        typer.echo("  Certs already exist — skipping.")
         return
 
     typer.echo("→ Generating agent CA and certificate...")
@@ -104,8 +115,8 @@ def permissions() -> None:
     audit_logs.mkdir(parents=True, exist_ok=True)
 
     typer.echo("→ Setting permissions on spire-server-data volume (UID 1000)...")
-    project_name = compose.run("config", "--format", "json", capture=True).stdout
     import json as _json
+    project_name = compose.run("config", "--format", "json", capture=True).stdout
     project = _json.loads(project_name).get("name", PROJECT_DIR.name)
     volume_name = f"{project}_spire-server-data"
     subprocess.run([
@@ -117,7 +128,6 @@ def permissions() -> None:
     typer.echo("→ Setting permissions on audit-logs (UID 999 for Fluentd)...")
     subprocess.run(["sudo", "chown", "-R", "999:999", str(audit_logs)], check=True)
     subprocess.run(["sudo", "chmod", "755", str(audit_logs)], check=True)
-
     typer.echo("  Done.")
 
 
@@ -159,18 +169,3 @@ def wait() -> None:
         time.sleep(3)
     typer.echo("  SPIRE server did not become healthy in time.", err=True)
     raise typer.Exit(1)
-
-
-def _onboard_all() -> None:
-    services_file = PROJECT_DIR / ".services"
-    services = (
-        services_file.read_text().split()
-        if services_file.exists()
-        else ["openclaw-gateway", "openclaw-gateway-2"]
-    )
-    for svc in services:
-        typer.echo(f"\n── Onboarding {svc} ──")
-        try:
-            compose.run_interactive(svc, "bash", "-c", "openclaw onboard")
-        except subprocess.CalledProcessError:
-            typer.echo(f"  [warn] Onboarding skipped or failed for {svc}")
