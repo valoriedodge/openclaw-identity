@@ -7,6 +7,9 @@ audit-logs/
 # Policy — each deployment defines its own permissions
 policy/
 
+# Plugin integrity hashes — generated per deployment, not committed
+plugin-hashes/
+
 # Tracked services — each deployment manages its own gateways
 .services
 

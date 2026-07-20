@@ -5,6 +5,7 @@ Openclaw Identity is a secure AI gateway platform setup that uses:
 - **SPIRE** for workload identity — each gateway container receives a cryptographic SPIFFE identity (SVID) at runtime
 - **Open Policy Agent (OPA)** for tool authorization — controls which tools each identity is permitted to call
 - **Fluentd** for audit logging
+- **Plugin integrity verification** — a hash of the installed plugin is stored on the host and checked before each gateway container starts
 
 Infrastructure is managed through the **myclawprint** CLI.
 
@@ -14,8 +15,8 @@ Infrastructure is managed through the **myclawprint** CLI.
 
 - Docker and Docker Compose
 - `openssl` (for certificate generation)
+- `npm` (for plugin installation)
 - `python3` with `typer` installed
-- `sudo` access (required once to set ownership on SPIRE data directories)
 
 ```bash
 pip3 install typer
@@ -63,19 +64,28 @@ python3 myclawprint setup all
 
 This runs the full install sequence:
 
-1. Creates required directories
+1. Creates required directories (`spire-agent-certs/`, `audit-logs/`, `policy/`, `plugin-hashes/`)
 2. Generates the SPIRE agent certificate (x509pop attestation)
-3. Sets correct ownership on SPIRE data directories
-4. Runs the interactive Openclaw onboarding process for each gateway
-5. Starts all containers
-6. Waits for SPIRE server to be healthy
-7. Registers each gateway as a SPIRE workload
+3. Adds gateway(s) to `docker-compose.yml`
+4. Seeds the default OPA policy before starting OPA
+5. Sets correct ownership on SPIRE data directories
+6. Starts infrastructure (SPIRE server, SPIRE agent, Fluentd, OPA)
+7. Installs the plugin into each gateway workspace and writes its integrity hash to `plugin-hashes/`
+8. Starts gateways — the verifier container checks the hash before each gateway is allowed to start
+9. Runs the interactive Openclaw onboarding process for each gateway
+10. Registers the plugin in each gateway's `openclaw.json` and restarts to activate it
+11. Registers each gateway as a SPIRE workload
 
-After setup, seed the default OPA permissions and verify a gateway received its identity:
+To create multiple gateways in one shot:
 
 ```bash
-python3 myclawprint policy seed
-python3 myclawprint identity fetch openclaw-gateway
+python3 myclawprint setup all --gateways 2
+```
+
+To skip the interactive onboarding step:
+
+```bash
+python3 myclawprint setup all --skip-onboard
 ```
 
 ---
@@ -83,23 +93,20 @@ python3 myclawprint identity fetch openclaw-gateway
 ## Adding a new gateway
 
 ```bash
-python3 myclawprint gateway add 3
+python3 myclawprint gateway add 2
 ```
 
 This will:
 
-1. Create `~/.openclaw_openclaw-gateway-3/workspace`
-2. Add `openclaw-gateway-3` to `docker-compose.yml` with label `app=openclaw-gateway-3`
-3. Run the interactive Openclaw onboarding for the new gateway
-4. Register it as a SPIRE workload with SPIFFE ID `spiffe://example.org/ns/apps/sa/openclaw-gateway-3`
+1. Create `~/.openclaw_openclaw-gateway-2/workspace`
+2. Add `openclaw-gateway-2` (plus its verifier and CLI containers) to `docker-compose.yml`
+3. Install the plugin and write the integrity hash to `plugin-hashes/openclaw-gateway-2.sha256`
+4. Start the gateway — the verifier checks the hash before the container launches
+5. Run the interactive Openclaw onboarding
+6. Register the plugin in `openclaw.json` and restart to activate it
+7. Register the gateway as a SPIRE workload with SPIFFE ID `spiffe://example.org/ns/apps/sa/openclaw-gateway-2`
 
-Then start it:
-
-```bash
-docker compose up -d openclaw-gateway-3
-```
-
-The gateway is tracked in `.services` so future `myclawprint identity register` calls include it automatically.
+The gateway is tracked in `.services` so future `myclawprint identity register` and `policy seed` calls include it automatically.
 
 ### Custom service name and label
 
@@ -128,7 +135,18 @@ python3 myclawprint gateway add 3 --name research-agent --label spiffe-research
 | `myclawprint setup status` | Show running container status |
 | `myclawprint gateway list` | List tracked gateways (from `.services`) |
 | `myclawprint gateway validate` | Check that each service has a matching `app` label in Docker |
-| `myclawprint gateway onboard <N>` | Re-run onboarding for a specific gateway |
+| `myclawprint gateway refresh <N>` | Rewrite a gateway's compose entries to pick up template changes |
+
+### Refreshing an existing gateway
+
+`gateway refresh` rewrites the compose entries for a gateway (the gateway service, its verifier, and its CLI container) using the current templates. Use this after updating myclawprint if the templates have changed — for example, if the verifier command was updated to show a better error message:
+
+```bash
+python3 myclawprint gateway refresh 1
+
+# Then recreate the affected containers to apply the changes
+docker compose up -d --force-recreate plugin-verifier-1 openclaw-gateway-1 openclaw-cli-1
+```
 
 ---
 
@@ -157,22 +175,20 @@ where `<label>` is the Docker `app` label set on the container (defaults to the 
 
 Each gateway identity has an explicit list of tools it is permitted to call. Permissions are stored in `policy/openclaw.rego` and reloaded by OPA automatically on change.
 
-> **Note:** `policy/` is gitignored. Run `python3 myclawprint policy seed` after cloning to generate a starter policy, then customise it for your deployment.
+> **Note:** `policy/` is gitignored. `myclawprint setup all` seeds it automatically before starting OPA. You can also run `python3 myclawprint policy seed` manually after cloning to generate a starter policy, then customise it for your deployment.
+
+Default permitted tools are `read` and `write`.
 
 **Grant a tool to an identity:**
 
 ```bash
-# Short service name
-python3 myclawprint policy grant openclaw-gateway read_file
-
-# Full SPIFFE ID
-python3 myclawprint policy grant spiffe://example.org/ns/apps/sa/openclaw-gateway read_file
+python3 myclawprint policy grant openclaw-gateway-1 exec
 ```
 
 **Revoke a tool:**
 
 ```bash
-python3 myclawprint policy revoke openclaw-gateway write_file
+python3 myclawprint policy revoke openclaw-gateway-1 exec
 ```
 
 **List all identities and their permitted tools:**
@@ -181,7 +197,7 @@ python3 myclawprint policy revoke openclaw-gateway write_file
 python3 myclawprint policy list
 ```
 
-**Seed default permissions** (writes a baseline policy for all default gateways):
+**Seed default permissions** (writes a baseline policy for all tracked gateways):
 
 ```bash
 python3 myclawprint policy seed
@@ -198,20 +214,18 @@ The SPIRE agent authenticates to the SPIRE server using an x509pop certificate s
 To regenerate certificates (e.g. on expiry):
 
 ```bash
-python3 myclawprint setup certs       # generates new certs (skips if present)
+python3 myclawprint setup certs --force
 ```
 
-Or to force regeneration, remove the existing certs first:
+After regenerating, recreate the containers so the new certs are picked up and the agent re-attests:
 
 ```bash
-rm spire-agent-certs/agent.crt.pem spire-agent-certs/agent.key.pem
-python3 myclawprint setup certs
-python3 myclawprint setup stop
-python3 myclawprint setup start
+docker compose stop spire-server spire-agent
+docker compose rm -f spire-server spire-agent
+docker compose up -d
 ```
 
-> After regenerating certs the SPIRE agent will re-attest with a new fingerprint.
-> Re-run `python3 myclawprint identity register` to update workload entries with the new parent ID.
+> After re-attestation the agent will have a new fingerprint. Re-run `python3 myclawprint identity register` to update workload entries with the new parent ID.
 
 ---
 
@@ -219,21 +233,53 @@ python3 myclawprint setup start
 
 The `plugin/` directory contains the `spiffe-security-enforcer` Openclaw plugin. It runs inside each gateway and:
 
-- **Watches the SPIFFE SVID** — maintains the current workload identity via the SPIRE agent socket
-- **Enforces OPA policy** — checks every tool call against `policy/openclaw.rego` before allowing it; fails closed if OPA is unreachable
-- **Signs audit logs** — sends a tamper-evident, hash-chained audit entry to Fluentd for every tool call, signed with the SVID private key
+- **Watches the SPIFFE SVID** — maintains the current workload identity via the SPIRE agent socket; clears identity if the stream ends (fail closed)
+- **Enforces OPA policy** — checks every tool call against `policy/openclaw.rego` before allowing it; blocks the call if OPA is unreachable
+- **Signs audit logs** — sends a tamper-evident, hash-chained audit entry to Fluentd for every tool call, signed with the SVID private key; blocks the call if Fluentd is disconnected
+
+The plugin fails closed on all three conditions — a tool call is blocked if the gateway cannot prove its identity, get authorization, or record the audit log.
+
+### Plugin integrity verification
+
+Before each gateway container starts, a Docker `plugin-verifier-N` container mounts the gateway's plugin directory (read-only) and the `plugin-hashes/` directory (read-only from the host) and runs:
+
+```
+sha256sum -c /hashes/<gateway-name>.sha256
+```
+
+If the hash doesn't match — or the hash file doesn't exist — the verifier exits with an error and Docker refuses to start the gateway. Because `plugin-hashes/` is on the host and never mounted writable into any container, a compromised container cannot update the hash to cover its tracks.
+
+| Command | Description |
+|---------|-------------|
+| `myclawprint gateway verify-plugin` | Check all gateways' installed plugins against their stored hashes |
+| `myclawprint gateway rehash-plugin <N>` | Regenerate the hash after an intentional plugin change |
+| `myclawprint gateway install-plugin <N>` | Reinstall the plugin from source and update the hash |
+
+If you intentionally modify the installed plugin at `~/.openclaw_<name>/extensions/spiffe-security-enforcer/index.ts`, you must regenerate the hash or the gateway will be blocked from starting on the next restart:
+
+```bash
+python3 myclawprint gateway rehash-plugin 1
+
+# With a custom service name
+python3 myclawprint gateway rehash-plugin 1 --name research-agent
+```
+
+This updates `plugin-hashes/<name>.sha256` on the host to match the current plugin. After rehashing, verify the gateway can start:
+
+```bash
+docker compose up -d openclaw-gateway-1
+```
+
+> **Note:** `rehash-plugin` should only be used after a deliberate, reviewed change. If `verify-plugin` reports a mismatch you did not expect, treat it as a potential tampering alert and investigate before rehashing.
 
 ### Installing the plugin
 
-The plugin is installed automatically when you run `myclawprint gateway add`. The install process:
+The plugin is installed automatically by `myclawprint setup all` and `myclawprint gateway add`. The install process:
 
-1. Copies `plugin/` into the gateway's extensions directory
-2. Runs `npm install`
-3. Registers the plugin: `openclaw plugins install npm-pack:/path/to/plugin`
-4. Enables the plugin: `openclaw plugins enable spiffe-security-enforcer`
-5. Restarts the gateway to activate it
-
-If the gateway container isn't running yet when `gateway add` is called, the plugin files are copied and npm-installed on the host, and a reminder is printed to run `install-plugin` once the container is up.
+1. Copies `plugin/` into `~/.openclaw_<name>/extensions/spiffe-security-enforcer/`
+2. Runs `npm install` in the copied directory
+3. Writes a SHA256 hash of `index.ts` to `plugin-hashes/<name>.sha256` on the host
+4. After onboarding creates `openclaw.json`, enables the plugin in the config and restarts the gateway
 
 To install or reinstall the plugin manually:
 
@@ -283,7 +329,8 @@ These are already set correctly in `docker-compose.yml`.
 ├── spire-agent-tool              # gitignored; download separately (see Installation)
 ├── .services                     # gitignored; generated when you add gateways
 ├── policy/
-│   └── openclaw.rego             # gitignored; generated by `myclawprint policy seed`
+│   └── openclaw.rego             # gitignored; generated by `myclawprint setup all` or `policy seed`
+├── plugin-hashes/                # gitignored; one .sha256 file per gateway, stored on host only
 ├── plugin/
 │   ├── index.ts                  # SPIFFE Zero Trust Enforcer plugin source
 │   ├── openclaw.plugin.json      # plugin manifest
