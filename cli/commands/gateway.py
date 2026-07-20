@@ -173,7 +173,7 @@ def _patch_origins(workspace: Path, port: int) -> None:
 
 
 def _install_plugin(name: str, workspace: Path) -> None:
-    """Copy plugin source to extensions/, npm install, write hash file, register in openclaw.json."""
+    """Copy plugin source to extensions/, npm install, and write hash file."""
     import shutil
 
     if not PLUGIN_SRC.exists():
@@ -199,22 +199,57 @@ def _install_plugin(name: str, workspace: Path) -> None:
     (workspace / HASH_FILENAME).write_text(manifest)
     typer.echo(f"  [ok] Hash written to {workspace / HASH_FILENAME}")
 
+
+def _run_onboard(name: str) -> None:
+    """Run openclaw onboard interactively inside an already-running gateway container."""
+    try:
+        compose.run_interactive(name, "bash", "-c", "openclaw onboard")
+    except subprocess.CalledProcessError:
+        typer.echo(f"  [warn] Onboarding skipped or failed for {name}")
+
+
+def _post_install(name: str, n: int) -> None:
+    """Register plugin in openclaw.json and restart container (call after onboarding creates the config)."""
+    workspace = _workspace_dir(name)
     config_file = workspace / "openclaw.json"
     if not config_file.exists():
-        typer.echo(f"  [warn] openclaw.json not found — skipping plugin registration (run after onboarding).")
+        typer.echo(f"  [warn] openclaw.json not found for {name} — plugin entry not registered.")
         return
 
     config = json.loads(config_file.read_text())
-    plugins = config.setdefault("plugins", {})
-    entries: dict = plugins.setdefault("entries", {})
+    entries: dict = config.setdefault("plugins", {}).setdefault("entries", {})
+    if entries.get(PLUGIN_NAME, {}).get("enabled"):
+        typer.echo(f"  [skip] Plugin already registered in openclaw.json for {name}")
+        return
+
     entries.setdefault(PLUGIN_NAME, {})["enabled"] = True
-
     config_file.write_text(json.dumps(config, indent=2))
-    typer.echo(f"  [ok] Registered and enabled '{PLUGIN_NAME}' in openclaw.json")
-
+    typer.echo(f"  [ok] Registered '{PLUGIN_NAME}' in openclaw.json")
     typer.echo(f"  Restarting {name} to activate plugin ...")
     compose.run("restart", name)
     typer.echo(f"  [ok] {name} restarted — plugin active.")
+
+
+def _register_entry(n: int, name: str, label: str) -> None:
+    """Create a SPIRE workload entry for this gateway."""
+    parent_id = spire.agent_spiffe_id()
+    if not parent_id:
+        typer.echo("  [warn] Could not determine agent SPIFFE ID — skipping registration.")
+        typer.echo("  Run 'myclawprint identity register' manually after the agent is running.")
+        return
+
+    result = spire.create_entry(
+        parent_id=parent_id,
+        spiffe_id=f"spiffe://{TRUST_DOMAIN}/ns/apps/sa/{label}",
+        selector=f"docker:label:app:{label}",
+    )
+    combined = (result.stdout or "") + (result.stderr or "")
+    if result.returncode == 0:
+        typer.echo(f"  [ok] Registered SPIRE entry: spiffe://{TRUST_DOMAIN}/ns/apps/sa/{label}")
+    elif "already exists" in combined:
+        typer.echo(f"  [skip] SPIRE entry already registered")
+    else:
+        typer.echo(f"  [warn] SPIRE registration failed:\n{combined}", err=True)
 
 
 def add_to_compose(n: int, name: str, label: str) -> None:
@@ -245,33 +280,12 @@ def configure_running(n: int, name: str, label: str, skip_onboard: bool = False)
 
     if not skip_onboard:
         typer.echo(f"── Onboarding {name} ──")
-        try:
-            compose.run_interactive(name, "bash", "-c", "openclaw onboard")
-        except subprocess.CalledProcessError:
-            typer.echo(f"  [warn] Onboarding skipped or failed for {name}")
+        _run_onboard(name)
 
     _install_plugin(name, workspace)
-
+    _post_install(name, n)
     _patch_origins(workspace, _host_port(n))
-
-    parent_id = spire.agent_spiffe_id()
-    if not parent_id:
-        typer.echo("  [warn] Could not determine agent SPIFFE ID — skipping registration.")
-        typer.echo("  Run 'myclawprint identity register' manually after the agent is running.")
-        return
-
-    result = spire.create_entry(
-        parent_id=parent_id,
-        spiffe_id=f"spiffe://{TRUST_DOMAIN}/ns/apps/sa/{label}",
-        selector=f"docker:label:app:{label}",
-    )
-    combined = (result.stdout or "") + (result.stderr or "")
-    if result.returncode == 0:
-        typer.echo(f"  [ok] Registered SPIRE entry: spiffe://{TRUST_DOMAIN}/ns/apps/sa/{label}")
-    elif "already exists" in combined:
-        typer.echo(f"  [skip] SPIRE entry already registered")
-    else:
-        typer.echo(f"  [warn] SPIRE registration failed:\n{combined}", err=True)
+    _register_entry(n, name, label)
 
 
 @app.command()
@@ -393,7 +407,9 @@ def install_plugin(
 ) -> None:
     """Install and enable the spiffe-security-enforcer plugin in a gateway."""
     name = name or _default_name(n)
-    _install_plugin(name, _workspace_dir(name))
+    workspace = _workspace_dir(name)
+    _install_plugin(name, workspace)
+    _post_install(name, n)
 
 
 @app.command()

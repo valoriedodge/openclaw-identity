@@ -37,15 +37,28 @@ def all(
     compose.run("up", "-d", "spire-server", "spire-agent", "fluentd-logger", "opa")
     wait()
 
-    typer.echo("→ Configuring gateways (plugin, onboard, origins)...")
+    typer.echo("→ Installing plugins (writing integrity hashes before gateway start)...")
     for n in range(1, gateways + 1):
-        name  = _gateway._default_name(n)
-        label = name
+        name = _gateway._default_name(n)
         typer.echo(f"\n── {name} ──")
-        _gateway.configure_running(n, name, label, skip_onboard=skip_onboard)
+        _gateway._install_plugin(name, _gateway._workspace_dir(name))
 
-    typer.echo("→ Starting gateways...")
+    typer.echo("\n→ Starting gateways (verifier will check hashes)...")
     compose.run("up", "-d")
+
+    if not skip_onboard:
+        typer.echo("\n→ Onboarding gateways...")
+        for n in range(1, gateways + 1):
+            name = _gateway._default_name(n)
+            typer.echo(f"\n── {name} ──")
+            _gateway._run_onboard(name)
+            _gateway._post_install(name, n)
+
+    typer.echo("\n→ Patching origins and registering SPIRE entries...")
+    for n in range(1, gateways + 1):
+        name = _gateway._default_name(n)
+        _gateway._patch_origins(_gateway._workspace_dir(name), _gateway._host_port(n))
+        _gateway._register_entry(n, name, name)
 
     typer.echo("\n→ Waiting for SPIRE agent attestation...")
     time.sleep(5)
