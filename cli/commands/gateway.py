@@ -17,12 +17,16 @@ SERVICES_FILE = PROJECT_DIR / ".services"
 BASE_PORT     = 18789
 TRUST_DOMAIN  = "example.org"
 
-PLUGIN_SRC   = PROJECT_DIR / "plugin"
-PLUGIN_NAME  = "spiffe-security-enforcer"
-HASH_FILENAME = ".plugin.sha256"
+PLUGIN_SRC  = PROJECT_DIR / "plugin"
+PLUGIN_NAME = "spiffe-security-enforcer"
+HASHES_DIR  = PROJECT_DIR / "plugin-hashes"
 
 # Files to skip when hashing the plugin
 _HASH_SKIP = {"node_modules", ".git", "__pycache__"}
+
+
+def _hash_file(name: str) -> Path:
+    return HASHES_DIR / f"{name}.sha256"
 
 
 def _default_name(n: int) -> str:
@@ -108,8 +112,9 @@ def _verifier_block(n: int, name: str) -> str:
     image: alpine
     volumes:
       - {home}:/workspace:ro
+      - {HASHES_DIR}:/hashes:ro
     working_dir: /workspace
-    command: sh -c "sha256sum -c {HASH_FILENAME} && echo '[ok] Plugin integrity verified'"
+    command: sh -c "sha256sum -c /hashes/{name}.sha256 && echo '[ok] Plugin integrity verified'"
     restart: "no"
 """
 
@@ -195,9 +200,10 @@ def _install_plugin(name: str, workspace: Path) -> None:
     typer.echo(f"  [ok] npm install complete")
 
     typer.echo(f"  Writing plugin integrity hash ...")
+    HASHES_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _compute_plugin_hash(dest)
-    (workspace / HASH_FILENAME).write_text(manifest)
-    typer.echo(f"  [ok] Hash written to {workspace / HASH_FILENAME}")
+    _hash_file(name).write_text(manifest)
+    typer.echo(f"  [ok] Hash written to {_hash_file(name)}")
 
 
 def _run_onboard(name: str) -> None:
@@ -310,26 +316,22 @@ def add(
 
     add_to_compose(n, name, label)
 
+    if not no_plugin:
+        typer.echo(f"→ Installing plugin (writing integrity hash before gateway start)...")
+        _install_plugin(name, _workspace_dir(name))
+
     typer.echo(f"→ Starting {name} ...")
     compose.run("up", "-d", name)
 
-    if not no_plugin or not no_onboard:
-        configure_running(n, name, label, skip_onboard=no_onboard)
-    elif not no_register:
-        parent_id = spire.agent_spiffe_id()
-        if parent_id:
-            result = spire.create_entry(
-                parent_id=parent_id,
-                spiffe_id=f"spiffe://{TRUST_DOMAIN}/ns/apps/sa/{label}",
-                selector=f"docker:label:app:{label}",
-            )
-            combined = (result.stdout or "") + (result.stderr or "")
-            if result.returncode == 0:
-                typer.echo(f"  [ok] Registered SPIRE entry: spiffe://{TRUST_DOMAIN}/ns/apps/sa/{label}")
-            elif "already exists" in combined:
-                typer.echo(f"  [skip] SPIRE entry already registered")
-            else:
-                typer.echo(f"  [warn] SPIRE registration failed:\n{combined}", err=True)
+    if not no_onboard:
+        _run_onboard(name)
+        if not no_plugin:
+            _post_install(name, n)
+
+    _patch_origins(_workspace_dir(name), _host_port(n))
+
+    if not no_register:
+        _register_entry(n, name, label)
 
     typer.echo(f"\nDone. Gateway '{name}' is running on port {_host_port(n)}.")
 
@@ -395,9 +397,10 @@ def rehash_plugin(
         typer.echo(f"[error] Plugin not installed at {dest}", err=True)
         raise typer.Exit(1)
 
+    HASHES_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _compute_plugin_hash(dest)
-    (workspace / HASH_FILENAME).write_text(manifest)
-    typer.echo(f"  [ok] Hash updated for '{name}'")
+    _hash_file(name).write_text(manifest)
+    typer.echo(f"  [ok] Hash updated for '{name}' at {_hash_file(name)}")
 
 
 @app.command()
@@ -423,7 +426,7 @@ def verify_plugin() -> None:
     errors = 0
     for svc in services:
         workspace  = _workspace_dir(svc)
-        hash_file  = workspace / HASH_FILENAME
+        hash_file  = _hash_file(svc)
         index_ts   = workspace / "extensions" / PLUGIN_NAME / "index.ts"
 
         if not hash_file.exists():

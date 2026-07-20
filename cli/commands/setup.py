@@ -8,6 +8,7 @@ from typing import List
 from ..utils import compose, spire
 from . import identity as _identity
 from . import gateway as _gateway
+from . import policy as _policy
 
 app = typer.Typer(help="First-time installation and infrastructure setup.")
 
@@ -32,6 +33,9 @@ def all(
         _gateway.add_to_compose(n, name, label)
 
     permissions()
+
+    typer.echo("→ Seeding OPA policy (must exist before OPA starts)...")
+    _policy.seed()
 
     typer.echo("→ Starting infrastructure...")
     compose.run("up", "-d", "spire-server", "spire-agent", "fluentd-logger", "opa")
@@ -74,6 +78,7 @@ def dirs() -> None:
         PROJECT_DIR / "spire-agent-certs",
         PROJECT_DIR / "audit-logs",
         PROJECT_DIR / "policy",
+        PROJECT_DIR / "plugin-hashes",
     ]:
         d.mkdir(parents=True, exist_ok=True)
     typer.echo("  Done.")
