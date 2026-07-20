@@ -24,6 +24,10 @@ async function watchSvid(): Promise<void> {
     }
   } catch (err) {
     console.error('[Audit] SVID stream ended, retrying in 5s:', (err as Error).message);
+  } finally {
+    // Clear identity when stream ends — fail closed until re-attested.
+    currentSpiffeId = null;
+    signingKey = null;
     setTimeout(watchSvid, 5000);
   }
 }
@@ -61,25 +65,36 @@ const SIEM_HOST = process.env.SIEM_HOST || 'fluentd-logger';
 const SIEM_PORT = process.env.SIEM_PORT ? parseInt(process.env.SIEM_PORT) : 24224;
 
 let tcpClient = new net.Socket();
+let siemConnected = false;
 
 function connectToSIEM() {
+  tcpClient = new net.Socket();
+  siemConnected = false;
+
   tcpClient.connect(SIEM_PORT, SIEM_HOST, () => {
+    siemConnected = true;
     console.log(`[Audit] Connected to SIEM at ${SIEM_HOST}:${SIEM_PORT} via TCP`);
+  });
+
+  tcpClient.on('error', (err) => {
+    siemConnected = false;
+    console.error(`[Audit] SIEM TCP connection error:`, err.message);
+  });
+
+  tcpClient.on('close', () => {
+    siemConnected = false;
+    console.warn(`[Audit] SIEM connection closed. Reconnecting in 5s...`);
+    setTimeout(connectToSIEM, 5000);
   });
 }
 
-tcpClient.on('error', (err) => {
-  console.error(`[Audit] SIEM TCP connection error:`, err.message);
-});
-
-tcpClient.on('close', () => {
-  console.warn(`[Audit] SIEM connection closed. Reconnecting in 5s...`);
-  setTimeout(connectToSIEM, 5000);
-});
-
 connectToSIEM();
 
-function sendSignedAuditLog(entry: object, key: crypto.KeyObject) {
+function sendSignedAuditLog(entry: object, key: crypto.KeyObject): void {
+  if (!siemConnected || tcpClient.pending || tcpClient.destroyed) {
+    throw new Error('SIEM TCP socket is not connected');
+  }
+
   const chainedEntry = {
     ...entry,
     previousHash,
@@ -91,13 +106,9 @@ function sendSignedAuditLog(entry: object, key: crypto.KeyObject) {
   const signature = crypto.sign('sha256', Buffer.from(payload), key).toString('base64');
   const message = Buffer.from(JSON.stringify({ payload: chainedEntry, hash: currentHash, signature }) + '\n');
 
-  if (!tcpClient.pending && !tcpClient.destroyed) {
-    tcpClient.write(message);
-    previousHash = currentHash;
-    chainSequence += 1;
-  } else {
-    console.error('[Audit] Cannot write audit log: TCP socket is disconnected.');
-  }
+  tcpClient.write(message);
+  previousHash = currentHash;
+  chainSequence += 1;
 }
 
 export default definePluginEntry({
@@ -113,41 +124,40 @@ export default definePluginEntry({
     api.on('before_tool_call', async (event) => {
       console.log(`[Audit] Tool call intercepted: ${event.toolName}`);
 
+      // Fail closed: no identity.
       if (!signingKey || !currentSpiffeId) {
         return { block: true, blockReason: 'Audit failure: SPIFFE SVID not yet available.' };
       }
 
-      // --- OPA policy check ---
+      // Fail closed: OPA unavailable or denied.
       let opaDecision: boolean;
       try {
         opaDecision = await isAuthorizedByOpa(currentSpiffeId, event.toolName, event.params);
       } catch (error) {
         console.error('[Audit] OPA query failed:', error);
-        // Fail closed: deny on OPA unavailability.
         return {
           block: true,
           blockReason: `Authorization failure: OPA unreachable (${error instanceof Error ? error.message : String(error)})`,
         };
       }
 
-      const auditEntry = {
-        type: 'TOOL_POLICY_EVALUATION',
-        spiffeId: currentSpiffeId,
-        agentId: event.runId ?? 'unknown',
-        toolName: event.toolName,
-        params: event.params,
-        opaDecision,
-        timestamp: Date.now(),
-      };
-
+      // Fail closed: audit log must be written before allowing the call.
       try {
-        sendSignedAuditLog(auditEntry, signingKey);
+        sendSignedAuditLog({
+          type: 'TOOL_POLICY_EVALUATION',
+          spiffeId: currentSpiffeId,
+          agentId: event.runId ?? 'unknown',
+          toolName: event.toolName,
+          params: event.params,
+          opaDecision,
+          timestamp: Date.now(),
+        }, signingKey);
         console.log(`[Audit] Log sent for tool: ${event.toolName}, allowed: ${opaDecision}`);
       } catch (error) {
         console.error('[Audit] Failed to send audit log:', error);
         return {
           block: true,
-          blockReason: `Audit failure: could not sign and log tool call (${error instanceof Error ? error.message : String(error)})`,
+          blockReason: `Audit failure: could not write audit log (${error instanceof Error ? error.message : String(error)})`,
         };
       }
 

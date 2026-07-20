@@ -32,8 +32,8 @@ def is_healthy() -> bool:
 
 
 def list_entries() -> str:
-    result = server("entry", "show", capture=True)
-    return result.stdout
+    result = server("entry", "show", capture=True, check=False)
+    return result.stdout or result.stderr
 
 
 def create_entry(parent_id: str, spiffe_id: str, selector: str) -> subprocess.CompletedProcess:

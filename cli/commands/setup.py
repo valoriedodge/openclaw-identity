@@ -62,10 +62,12 @@ def dirs() -> None:
 
 
 @app.command()
-def certs() -> None:
+def certs(
+    force: bool = typer.Option(False, "--force", help="Regenerate certs even if they already exist."),
+) -> None:
     """Generate SPIRE agent certificate (x509pop). Skips if already present."""
-    if AGENT_CERT.exists():
-        typer.echo("  Certs already exist — skipping.")
+    if AGENT_CERT.exists() and not force:
+        typer.echo("  Certs already exist — skipping. Use --force to regenerate.")
         return
 
     typer.echo("→ Generating agent CA and certificate...")

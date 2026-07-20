@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import subprocess
@@ -16,8 +17,12 @@ SERVICES_FILE = PROJECT_DIR / ".services"
 BASE_PORT     = 18789
 TRUST_DOMAIN  = "example.org"
 
-PLUGIN_SRC  = PROJECT_DIR / "plugin"
-PLUGIN_NAME = "spiffe-security-enforcer"
+PLUGIN_SRC   = PROJECT_DIR / "plugin"
+PLUGIN_NAME  = "spiffe-security-enforcer"
+HASH_FILENAME = ".plugin.sha256"
+
+# Files to skip when hashing the plugin
+_HASH_SKIP = {"node_modules", ".git", "__pycache__"}
 
 
 def _default_name(n: int) -> str:
@@ -26,6 +31,10 @@ def _default_name(n: int) -> str:
 
 def _default_cli_name(n: int) -> str:
     return f"openclaw-cli-{n}"
+
+
+def _default_verifier_name(n: int) -> str:
+    return f"plugin-verifier-{n}"
 
 
 def _workspace_dir(name: str) -> Path:
@@ -40,9 +49,17 @@ def _host_port(n: int) -> int:
     return BASE_PORT + n * 100
 
 
+def _compute_plugin_hash(dest: Path) -> str:
+    """Hash the installed index.ts. Returns a sha256sum-compatible line relative to the workspace."""
+    index_ts = dest / "index.ts"
+    digest = hashlib.sha256(index_ts.read_bytes()).hexdigest()
+    return f"{digest}  extensions/{PLUGIN_NAME}/index.ts\n"
+
+
 def _service_block(n: int, name: str, label: str) -> str:
-    port_var  = f"OPENCLAW_GATEWAY_{n}_PORT"
-    home      = _workspace_dir(name)
+    port_var      = f"OPENCLAW_GATEWAY_{n}_PORT"
+    home          = _workspace_dir(name)
+    verifier_name = _default_verifier_name(n)
     return f"""
   {name}:
     image: ghcr.io/openclaw/openclaw:latest
@@ -74,8 +91,26 @@ def _service_block(n: int, name: str, label: str) -> str:
       retries: 5
       start_period: 20s
     depends_on:
-      - spire-agent
-      - fluentd-logger
+      {verifier_name}:
+        condition: service_completed_successfully
+      spire-agent:
+        condition: service_started
+      fluentd-logger:
+        condition: service_started
+"""
+
+
+def _verifier_block(n: int, name: str) -> str:
+    verifier_name = _default_verifier_name(n)
+    home          = _workspace_dir(name)
+    return f"""
+  {verifier_name}:
+    image: alpine
+    volumes:
+      - {home}:/workspace:ro
+    working_dir: /workspace
+    command: sh -c "sha256sum -c {HASH_FILENAME} && echo '[ok] Plugin integrity verified'"
+    restart: "no"
 """
 
 
@@ -138,7 +173,7 @@ def _patch_origins(workspace: Path, port: int) -> None:
 
 
 def _install_plugin(name: str, workspace: Path) -> None:
-    """Copy plugin source to extensions/ and register it in openclaw.json."""
+    """Copy plugin source to extensions/, npm install, write hash file, register in openclaw.json."""
     import shutil
 
     if not PLUGIN_SRC.exists():
@@ -159,6 +194,11 @@ def _install_plugin(name: str, workspace: Path) -> None:
         raise typer.Exit(1)
     typer.echo(f"  [ok] npm install complete")
 
+    typer.echo(f"  Writing plugin integrity hash ...")
+    manifest = _compute_plugin_hash(dest)
+    (workspace / HASH_FILENAME).write_text(manifest)
+    typer.echo(f"  [ok] Hash written to {workspace / HASH_FILENAME}")
+
     config_file = workspace / "openclaw.json"
     if not config_file.exists():
         typer.echo(f"  [warn] openclaw.json not found — skipping plugin registration (run after onboarding).")
@@ -178,9 +218,10 @@ def _install_plugin(name: str, workspace: Path) -> None:
 
 
 def add_to_compose(n: int, name: str, label: str) -> None:
-    """Add a gateway + paired CLI service to docker-compose.yml and track the gateway."""
-    content  = COMPOSE_FILE.read_text()
-    cli_name = _default_cli_name(n)
+    """Add a gateway + verifier + CLI to docker-compose.yml and track the gateway."""
+    content      = COMPOSE_FILE.read_text()
+    cli_name     = _default_cli_name(n)
+    verifier_name = _default_verifier_name(n)
 
     if f"  {name}:" in content:
         typer.echo(f"  [info] '{name}' already in docker-compose.yml")
@@ -188,13 +229,13 @@ def add_to_compose(n: int, name: str, label: str) -> None:
         (_workspace_dir(name) / "workspace").mkdir(parents=True, exist_ok=True)
         (_cli_workspace_dir(n) / "workspace").mkdir(parents=True, exist_ok=True)
 
-        block   = _service_block(n, name, label) + _cli_block(n, name)
+        block   = _verifier_block(n, name) + _service_block(n, name, label) + _cli_block(n, name)
         updated = re.sub(r'(\nvolumes:)', block + r'\1', content)
         if updated == content:
             typer.echo("[error] Could not find insertion point in docker-compose.yml", err=True)
             raise typer.Exit(1)
         COMPOSE_FILE.write_text(updated)
-        typer.echo(f"  [ok] Added '{name}' and '{cli_name}' to docker-compose.yml (port {_host_port(n)}, label app={label})")
+        typer.echo(f"  [ok] Added '{name}', '{verifier_name}', and '{cli_name}' to docker-compose.yml")
     _track_service(name)
 
 
@@ -261,7 +302,6 @@ def add(
     if not no_plugin or not no_onboard:
         configure_running(n, name, label, skip_onboard=no_onboard)
     elif not no_register:
-        # register only
         parent_id = spire.agent_spiffe_id()
         if parent_id:
             result = spire.create_entry(
@@ -280,6 +320,41 @@ def add(
     typer.echo(f"\nDone. Gateway '{name}' is running on port {_host_port(n)}.")
 
 
+@app.command()
+def refresh(
+    n: int = typer.Argument(..., help="Gateway number to refresh."),
+    name: str = typer.Option(None, "--name", help="Service name (default: openclaw-gateway-N)."),
+    label: str = typer.Option(None, "--label", help="Docker 'app' label (default: same as --name)."),
+) -> None:
+    """Rewrite a gateway's docker-compose entries to pick up template changes (e.g. adding the verifier)."""
+    name  = name  or _default_name(n)
+    label = label or name
+    cli_name      = _default_cli_name(n)
+    verifier_name = _default_verifier_name(n)
+
+    content = COMPOSE_FILE.read_text()
+
+    # Remove existing blocks for this gateway, its cli, and its verifier
+    for svc in [verifier_name, name, cli_name]:
+        # Match from "  <svc>:\n" up to the next top-level service or volumes:
+        content = re.sub(
+            rf'\n  {re.escape(svc)}:.*?(?=\n  \S|\nvolumes:)',
+            '',
+            content,
+            flags=re.DOTALL,
+        )
+
+    block   = _verifier_block(n, name) + _service_block(n, name, label) + _cli_block(n, name)
+    updated = re.sub(r'(\nvolumes:)', block + r'\1', content)
+    if updated == content:
+        typer.echo("[error] Could not find insertion point in docker-compose.yml", err=True)
+        raise typer.Exit(1)
+
+    COMPOSE_FILE.write_text(updated)
+    typer.echo(f"  [ok] Refreshed '{name}', '{verifier_name}', and '{cli_name}' in docker-compose.yml")
+    typer.echo(f"  Run 'docker compose up -d {name}' to apply.")
+
+
 @app.command(name="list")
 def list_gateways() -> None:
     """List all tracked gateways."""
@@ -293,6 +368,25 @@ def list_gateways() -> None:
 
 
 @app.command()
+def rehash_plugin(
+    n: int = typer.Argument(..., help="Gateway number."),
+    name: str = typer.Option(None, "--name", help="Service name (default: openclaw-gateway-N)."),
+) -> None:
+    """Regenerate the plugin hash for a gateway after intentional plugin changes."""
+    name      = name or _default_name(n)
+    workspace = _workspace_dir(name)
+    dest      = workspace / "extensions" / PLUGIN_NAME
+
+    if not (dest / "index.ts").exists():
+        typer.echo(f"[error] Plugin not installed at {dest}", err=True)
+        raise typer.Exit(1)
+
+    manifest = _compute_plugin_hash(dest)
+    (workspace / HASH_FILENAME).write_text(manifest)
+    typer.echo(f"  [ok] Hash updated for '{name}'")
+
+
+@app.command()
 def install_plugin(
     n: int = typer.Argument(..., help="Gateway number."),
     name: str = typer.Option(None, "--name", help="Service name (default: openclaw-gateway-N)."),
@@ -300,6 +394,42 @@ def install_plugin(
     """Install and enable the spiffe-security-enforcer plugin in a gateway."""
     name = name or _default_name(n)
     _install_plugin(name, _workspace_dir(name))
+
+
+@app.command()
+def verify_plugin() -> None:
+    """Check that each gateway's installed plugin matches its stored hash (tamper detection)."""
+    services = _tracked_services()
+    if not services:
+        typer.echo("No tracked gateways.")
+        return
+
+    errors = 0
+    for svc in services:
+        workspace  = _workspace_dir(svc)
+        hash_file  = workspace / HASH_FILENAME
+        index_ts   = workspace / "extensions" / PLUGIN_NAME / "index.ts"
+
+        if not hash_file.exists():
+            typer.echo(f"  [FAIL] {svc}: no hash file — run 'myclawprint gateway install-plugin'")
+            errors += 1
+            continue
+        if not index_ts.exists():
+            typer.echo(f"  [FAIL] {svc}: plugin not installed")
+            errors += 1
+            continue
+
+        current = _compute_plugin_hash(workspace / "extensions" / PLUGIN_NAME)
+        stored  = hash_file.read_text()
+        if current == stored:
+            digest = current.split()[0][:16]
+            typer.echo(f"  [ok]   {svc}: {digest}...")
+        else:
+            typer.echo(f"  [FAIL] {svc}: plugin has been modified since installation", err=True)
+            errors += 1
+
+    if errors:
+        raise typer.Exit(1)
 
 
 @app.command()
