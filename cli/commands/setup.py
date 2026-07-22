@@ -32,8 +32,6 @@ def all(
         label = name
         _gateway.add_to_compose(n, name, label)
 
-    permissions()
-
     typer.echo("→ Seeding OPA policy (must exist before OPA starts)...")
     _policy.seed()
 
@@ -82,6 +80,51 @@ def dirs() -> None:
     ]:
         d.mkdir(parents=True, exist_ok=True)
     typer.echo("  Done.")
+    _ensure_spire_permissions_service()
+
+
+def _ensure_spire_permissions_service() -> None:
+    """Inject init-spire-permissions into docker-compose.yml if not already present.
+
+    docker-compose.yml is gitignored (users append gateway entries locally), so
+    this fix lives in code rather than the committed file.
+    """
+    import re as _re
+    compose_file = PROJECT_DIR / "docker-compose.yml"
+    if not compose_file.exists():
+        return
+    content = compose_file.read_text()
+    if "init-spire-permissions" in content:
+        return
+
+    init_block = (
+        "  init-spire-permissions:\n"
+        "    image: busybox\n"
+        "    command: [\"chown\", \"-R\", \"1000:1000\", \"/data\"]\n"
+        "    volumes:\n"
+        "      - spire-server-data:/data\n"
+        "    restart: \"no\"\n\n"
+    )
+    depends_block = (
+        "    depends_on:\n"
+        "      init-spire-permissions:\n"
+        "        condition: service_completed_successfully\n"
+    )
+
+    # Insert init service before spire-server
+    content = content.replace("  spire-server:\n", init_block + "  spire-server:\n", 1)
+
+    # Add depends_on to spire-server (after its last volume line, before next service)
+    content = _re.sub(
+        r'(  spire-server:.*?)((?=\n  \S))',
+        lambda m: m.group(1) + depends_block if "depends_on" not in m.group(1) else m.group(0),
+        content,
+        count=1,
+        flags=_re.DOTALL,
+    )
+
+    compose_file.write_text(content)
+    typer.echo("  [ok] Added init-spire-permissions to docker-compose.yml")
 
 
 @app.command()
@@ -137,14 +180,27 @@ def permissions() -> None:
     import os
     project = os.environ.get("COMPOSE_PROJECT_NAME", PROJECT_DIR.name)
 
-    typer.echo("→ Setting permissions on spire-server-data volume (UID 1000)...")
-    subprocess.run(["docker", "volume", "create", f"{project}_spire-server-data"], check=True)
-    subprocess.run([
+    volume = f"{project}_spire-server-data"
+    typer.echo(f"→ Setting permissions on {volume} (UID 1000)...")
+    subprocess.run(["docker", "volume", "create", volume], check=True)
+
+    # Pull busybox first so the chown doesn't hang waiting for a slow image pull.
+    pull = subprocess.run(["docker", "pull", "busybox"], timeout=60)
+    if pull.returncode != 0:
+        typer.echo(f"  [warn] Could not pull busybox — skipping chown. If SPIRE fails to start, run manually:")
+        typer.echo(f"  docker run --rm -v {volume}:/data busybox chown -R 1000:1000 /data")
+        return
+
+    result = subprocess.run([
         "docker", "run", "--rm",
-        "-v", f"{project}_spire-server-data:/data",
+        "-v", f"{volume}:/data",
         "busybox", "chown", "-R", "1000:1000", "/data",
-    ], check=True)
-    typer.echo("  Done.")
+    ], timeout=30)
+    if result.returncode != 0:
+        typer.echo(f"  [warn] chown failed. If SPIRE fails to start, run manually:")
+        typer.echo(f"  docker run --rm -v {volume}:/data busybox chown -R 1000:1000 /data")
+    else:
+        typer.echo("  Done.")
 
 
 @app.command()
